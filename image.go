@@ -483,8 +483,8 @@ func (d *Downloader) downloadDirect() (string, []byte, error) {
 		return d.apiURL, nil, fmt.Errorf("读取响应体失败: %w", err)
 	}
 
-	// 尝试从HTML中提取图片URL
-	if imgURL := extractImageURL(body); imgURL != "" {
+	// 尝试从HTML中提取图片URL - 这里传入基础URL
+	if imgURL := extractImageURL(body, d.apiURL); imgURL != "" {
 		if d.verbose {
 			fmt.Printf("从HTML中提取到图片URL: %s\n", imgURL)
 		}
@@ -518,8 +518,14 @@ func isValidImage(data []byte) bool {
 	return false
 }
 
-// 从HTML中提取图片URL
-func extractImageURL(html []byte) string {
+// 从HTML中提取图片URL（增强版：处理相对路径）
+func extractImageURL(html []byte, baseURL string) string {
+	// 解析基础URL
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+
 	// 简单查找图片URL的模式
 	patterns := []string{
 		`<img[^>]+src="([^"]+)"`,
@@ -535,7 +541,17 @@ func extractImageURL(html []byte) string {
 		re := regexp.MustCompile(pattern)
 		matches := re.FindSubmatch(html)
 		if len(matches) > 1 {
-			return string(matches[1])
+			imgURL := string(matches[1])
+			
+			// 解析提取到的URL
+			parsed, err := url.Parse(imgURL)
+			if err != nil {
+				continue
+			}
+			
+			// 转换为绝对URL
+			absoluteURL := base.ResolveReference(parsed).String()
+			return absoluteURL
 		}
 	}
 	return ""
