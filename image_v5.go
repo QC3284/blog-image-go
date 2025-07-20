@@ -4,12 +4,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"image"
-	"image/jpeg"
-	_ "image/gif" // 注册GIF解码器
-	_ "image/png" // 注册PNG解码器
 	"io"
 	"log"
 	"net/http"
@@ -21,9 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	// 添加WEBP支持
-	"github.com/chai2010/webp"
 )
 
 // 免责声明常量
@@ -75,13 +67,13 @@ func main() {
 	fmt.Scanln(&retryInput)
 	infiniteRetry := strings.ToLower(retryInput) == "y"
 
-	fmt.Print("请输入并发线程数(1-1048576): ")
+	fmt.Print("请输入并发线程数(1-32768): ")
 	var maxWorkers int
 	_, err := fmt.Scanln(&maxWorkers)
 	if err != nil || maxWorkers < 1 {
 		maxWorkers = 1
-	} else if maxWorkers > 1048576 {
-		maxWorkers = 1048576
+	} else if maxWorkers > 32768 {
+		maxWorkers = 32768
 	}
 
 	// 创建下载器实例
@@ -150,7 +142,7 @@ func (d *Downloader) scanExistingFiles() error {
 		return err
 	}
 
-	pattern := regexp.MustCompile(`^(\d+)\.(jpg|jpeg|png|webp)$`)
+	pattern := regexp.MustCompile(`^(\d+)\.jpg$`)
 	maxNum := 0
 
 	for _, file := range files {
@@ -262,19 +254,9 @@ func (d *Downloader) worker(id int, taskChan <-chan struct{}) {
 		d.downloadedHashes[hashStr] = true
 		d.mu.Unlock()
 
-		// 检测是否为WEBP并尝试转换
-		converted, err := convertToJpeg(imgData, d.verbose)
-		if err != nil {
-			fmt.Printf("[Worker %d] 图片转换失败: %v\n", id, err)
-			if !d.infiniteRetry {
-				return
-			}
-			continue
-		}
-
 		// 保存文件
 		filePath := filepath.Join(d.saveDir, filename)
-		if err := os.WriteFile(filePath, converted, 0644); err != nil {
+		if err := os.WriteFile(filePath, imgData, 0644); err != nil {
 			fmt.Printf("[Worker %d] 保存文件失败: %v\n", id, err)
 			if !d.infiniteRetry {
 				return
@@ -285,55 +267,6 @@ func (d *Downloader) worker(id int, taskChan <-chan struct{}) {
 		fmt.Printf("[Worker %d] 图片已保存: %s\n", id, filePath)
 		success = true
 	}
-}
-
-// 将图像转换为JPEG格式
-func convertToJpeg(imgData []byte, verbose bool) ([]byte, error) {
-	// 检查是否是WEBP格式 (RIFF....WEBP)
-	if bytes.HasPrefix(imgData, []byte("RIFF")) && len(imgData) > 12 && bytes.HasPrefix(imgData[8:12], []byte("WEBP")) {
-		if verbose {
-			fmt.Println("检测到WEBP图像，正在转换为JPEG...")
-		}
-
-		// 解码WEBP
-		img, err := webp.Decode(bytes.NewReader(imgData))
-		if err != nil {
-			return nil, fmt.Errorf("WEBP解码失败: %w", err)
-		}
-
-		// 编码为JPEG
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
-			return nil, fmt.Errorf("JPEG编码失败: %w", err)
-		}
-
-		return buf.Bytes(), nil
-	}
-
-	// 检查是否是JPEG格式 (FF D8 FF)
-	if bytes.HasPrefix(imgData, []byte{0xFF, 0xD8, 0xFF}) {
-		// 已经是JPEG，直接返回
-		return imgData, nil
-	}
-
-	// 尝试解码其他格式
-	if verbose {
-		fmt.Println("检测到非JPEG图像，尝试转换为JPEG...")
-	}
-
-	// 解码图像 (支持PNG, GIF, 等)
-	img, _, err := image.Decode(bytes.NewReader(imgData))
-	if err != nil {
-		return nil, fmt.Errorf("图像解码失败: %w", err)
-	}
-
-	// 编码为JPEG
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
-		return nil, fmt.Errorf("JPEG编码失败: %w", err)
-	}
-
-	return buf.Bytes(), nil
 }
 
 func (d *Downloader) downloadWithRedirect() (string, []byte, error) {
@@ -452,6 +385,11 @@ func (d *Downloader) downloadImage(imgURL string) (string, []byte, error) {
 		return imgURL, nil, fmt.Errorf("图片数据过小: %d bytes", len(imgData))
 	}
 
+	// 检查图片签名
+	if !isValidImage(imgData) {
+		return imgURL, nil, fmt.Errorf("无效的图片格式")
+	}
+
 	return imgURL, imgData, nil
 }
 
@@ -528,68 +466,16 @@ func (d *Downloader) downloadDirect() (string, []byte, error) {
 			return d.apiURL, nil, fmt.Errorf("图片数据过小: %d bytes", len(imgData))
 		}
 
+		if !isValidImage(imgData) {
+			return d.apiURL, nil, fmt.Errorf("无效的图片格式")
+		}
+
 		return d.apiURL, imgData, nil
 	}
 
-	// 处理JSON响应
-	if strings.Contains(contentType, "application/json") {
-		if d.verbose {
-			fmt.Println("检测到JSON响应，尝试解析图片URL")
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return d.apiURL, nil, fmt.Errorf("读取JSON响应失败: %w", err)
-		}
-
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err != nil {
-			return d.apiURL, nil, fmt.Errorf("JSON解析失败: %w", err)
-		}
-
-		// 尝试常见JSON键名
-		keys := []string{"url", "image", "src", "image_url", "img", "file", "link", "data"}
-		for _, key := range keys {
-			if val, ok := result[key]; ok {
-				if imgURL, ok := val.(string); ok && imgURL != "" {
-					// 确保URL是绝对的
-					base, _ := url.Parse(d.apiURL)
-					absURL, err := base.Parse(imgURL)
-					if err == nil {
-						if d.verbose {
-							fmt.Printf("从JSON中提取到图片URL: %s\n", absURL.String())
-						}
-						return d.downloadImage(absURL.String())
-					}
-				}
-			}
-		}
-
-		// 尝试嵌套结构
-		if data, ok := result["data"].(map[string]interface{}); ok {
-			for _, key := range keys {
-				if val, ok := data[key]; ok {
-					if imgURL, ok := val.(string); ok && imgURL != "" {
-						// 确保URL是绝对的
-						base, _ := url.Parse(d.apiURL)
-						absURL, err := base.Parse(imgURL)
-						if err == nil {
-							if d.verbose {
-								fmt.Printf("从嵌套JSON中提取到图片URL: %s\n", absURL.String())
-							}
-							return d.downloadImage(absURL.String())
-						}
-					}
-				}
-			}
-		}
-
-		return d.apiURL, nil, fmt.Errorf("JSON中未找到有效的图片URL")
-	}
-
-	// 尝试从HTML中提取图片URL
+	// 可能是HTML响应，尝试解析
 	if d.verbose {
-		fmt.Println("尝试从响应内容解析图片URL")
+		fmt.Println("响应内容不是图片，尝试解析可能的URL")
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -597,10 +483,10 @@ func (d *Downloader) downloadDirect() (string, []byte, error) {
 		return d.apiURL, nil, fmt.Errorf("读取响应体失败: %w", err)
 	}
 
-	// 尝试从内容中提取图片URL
+	// 尝试从HTML中提取图片URL - 这里传入基础URL
 	if imgURL := extractImageURL(body, d.apiURL); imgURL != "" {
 		if d.verbose {
-			fmt.Printf("从内容中提取到图片URL: %s\n", imgURL)
+			fmt.Printf("从HTML中提取到图片URL: %s\n", imgURL)
 		}
 		return d.downloadImage(imgURL)
 	}
@@ -608,8 +494,32 @@ func (d *Downloader) downloadDirect() (string, []byte, error) {
 	return d.apiURL, nil, fmt.Errorf("无法提取图片URL: %s", contentType)
 }
 
-// 从内容中提取图片URL
-func extractImageURL(content []byte, baseURL string) string {
+// 检查图片格式签名
+func isValidImage(data []byte) bool {
+	if len(data) < 12 {
+		return false
+	}
+
+	// 检查常见图片格式
+	switch {
+	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}): // JPEG
+		return true
+	case bytes.HasPrefix(data, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}): // PNG
+		return true
+	case bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a")): // GIF
+		return true
+	case bytes.HasPrefix(data, []byte{0x42, 0x4D}): // BMP
+		return true
+	case len(data) > 12 && bytes.HasPrefix(data, []byte{0x52, 0x49, 0x46, 0x46}) && 
+		bytes.HasPrefix(data[8:], []byte{0x57, 0x45, 0x42, 0x50}): // WEBP
+		return true
+	}
+
+	return false
+}
+
+// 从HTML中提取图片URL（增强版：处理相对路径）
+func extractImageURL(html []byte, baseURL string) string {
 	// 解析基础URL
 	base, err := url.Parse(baseURL)
 	if err != nil {
@@ -625,12 +535,11 @@ func extractImageURL(content []byte, baseURL string) string {
 		`meta property="og:image" content="([^"]+)"`,
 		`meta name="twitter:image" content="([^"]+)"`,
 		`background-image:\s*url\(['"]?([^'")]+)['"]?\)`,
-		`(https?://[^\s"']+\.(jpg|jpeg|png|gif|bmp|webp))`,
 	}
 
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)
-		matches := re.FindSubmatch(content)
+		matches := re.FindSubmatch(html)
 		if len(matches) > 1 {
 			imgURL := string(matches[1])
 			
