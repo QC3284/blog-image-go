@@ -67,13 +67,13 @@ func main() {
 	fmt.Scanln(&retryInput)
 	infiniteRetry := strings.ToLower(retryInput) == "y"
 
-	fmt.Print("请输入并发线程数(1-2048): ")
+	fmt.Print("请输入并发线程数(1-4096): ")
 	var maxWorkers int
 	_, err := fmt.Scanln(&maxWorkers)
 	if err != nil || maxWorkers < 1 {
 		maxWorkers = 1
-	} else if maxWorkers > 2048 {
-		maxWorkers = 2048
+	} else if maxWorkers > 4096 {
+		maxWorkers = 4096
 	}
 
 	// 创建下载器实例
